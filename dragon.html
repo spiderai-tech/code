@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Wyrm: Cursor Dragon</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #1a0408;
+    font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+  }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; filter: hue-rotate(180deg) saturate(1.3) brightness(1.15); }
+  #fx { position: fixed; left: 0; top: 0; pointer-events: none; filter: none; }
+  #hud {
+    position: fixed; left: 14px; bottom: 12px;
+    color: #d9a7a0; font-size: 13px; letter-spacing: .4px;
+    opacity: .75; pointer-events: none; user-select: none;
+    text-shadow: 0 0 6px #000;
+  }
+  #hud b { color: #ff5a3a; font-weight: 600; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<canvas id="fx"></canvas>
+<div id="hud">Length <b id="len">0</b> &nbsp;·&nbsp; move to guide &nbsp;·&nbsp; hold to breathe fire &nbsp;·&nbsp; R to reset</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const lenEl = document.getElementById('len');
+  const fxC = document.getElementById('fx');
+  const fx = fxC.getContext('2d');
+
+  let W, H, DPR;
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------- Input ----------
+  const mouse = { x: 0, y: 0, down: false, seen: false };
+  function setPos(e) { mouse.x = e.clientX; mouse.y = e.clientY; mouse.seen = true; }
+  window.addEventListener('pointermove', setPos);
+  window.addEventListener('pointerdown', e => { setPos(e); mouse.down = true; });
+  window.addEventListener('pointerup', () => mouse.down = false);
+  window.addEventListener('pointercancel', () => mouse.down = false);
+  window.addEventListener('keydown', e => { if (e.key === 'r' || e.key === 'R') reset(); });
+
+  // ---------- Dragon state ----------
+  const SEG = 12;         // distance between spine points
+  const START_SEG = 14;
+  const MAX_SEG = 120;    // maximum body segments
+  const GROW_EVERY = 0.4; // seconds between growth steps
+
+  let spine = [];
+  let t = 0;
+  let lastGrow = 0;
+  let fire = [];
+  const stars = Array.from({ length: 160 }, () => ({ x: Math.random(), y: Math.random(), s: Math.random() * 1.4 + 0.3, p: Math.random() * 6.28 }));
+  function bgGrad() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#2a0610');
+    g.addColorStop(0.6, '#140305');
+    g.addColorStop(1, '#070102');
+    return g;
+  }
+  let embers = [];
+
+  function reset() {
+    spine = [];
+    for (let i = 0; i < START_SEG; i++) spine.push({ x: W / 2 - i * SEG, y: H / 2 });
+    fire.length = 0;
+    embers.length = 0;
+    lastGrow = t;
+  }
+  reset();
+  mouse.x = W / 2; mouse.y = H / 2;
+
+  function grow() {
+    const n = spine.length;
+    const a = spine[n - 2], b = spine[n - 1];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const d = Math.hypot(dx, dy) || 1;
+    spine.push({ x: b.x + dx / d * SEG, y: b.y + dy / d * SEG });
+  }
+
+  function update(dt) {
+    t += dt;
+
+    // Head eases toward the cursor (frame-rate independent)
+    const head = spine[0];
+    const k = 1 - Math.pow(0.02, dt);
+    head.x += (mouse.x - head.x) * k;
+    head.y += (mouse.y - head.y) * k;
+
+    // Each segment follows the one in front of it
+    for (let i = 1; i < spine.length; i++) {
+      const p = spine[i], q = spine[i - 1];
+      const dx = q.x - p.x, dy = q.y - p.y;
+      const d = Math.hypot(dx, dy) || 0.0001;
+      const f = (d - SEG) / d;
+      p.x += dx * f;
+      p.y += dy * f;
+    }
+
+    // Grow over time
+    if (t - lastGrow > GROW_EVERY && spine.length < MAX_SEG) {
+      grow();
+      lastGrow = t;
+    }
+
+    // Fire breath
+    if (mouse.down) {
+      const hd = headingAngle();
+      const sx = head.x + Math.cos(hd) * 40;
+      const sy = head.y + Math.sin(hd) * 40;
+      for (let i = 0; i < 4; i++) {
+        const a = hd + (Math.random() - 0.5) * 0.35;
+        const sp = 260 + Math.random() * 220;
+        fire.push({
+          x: sx, y: sy,
+          vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+          life: 0.5 + Math.random() * 0.5, max: 0,
+          size: 6 + Math.random() * 8
+        });
+        fire[fire.length - 1].max = fire[fire.length - 1].life;
+      }
+    }
+    for (let i = fire.length - 1; i >= 0; i--) {
+      const p = fire[i];
+      p.life -= dt;
+      if (p.life <= 0) { fire.splice(i, 1); continue; }
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.vx *= 0.97; p.vy = p.vy * 0.97 - 140 * dt; p.vx += (Math.random() - 0.5) * 400 * dt;
+    }
+
+    // Embers drifting up from the tail
+    const tail = spine[spine.length - 1];
+    if (Math.random() < 0.5) {
+      embers.push({
+        x: tail.x + (Math.random() - 0.5) * 10,
+        y: tail.y + (Math.random() - 0.5) * 10,
+        vx: (Math.random() - 0.5) * 20,
+        vy: -20 - Math.random() * 30,
+        life: 1.5 + Math.random() * 1.5, max: 0
+      });
+      embers[embers.length - 1].max = embers[embers.length - 1].life;
+    }
+    for (let i = embers.length - 1; i >= 0; i--) {
+      const e = embers[i];
+      e.life -= dt;
+      if (e.life <= 0) { embers.splice(i, 1); continue; }
+      e.x += e.vx * dt; e.y += e.vy * dt;
+    }
+  }
+
+  function headingAngle() {
+    const a = spine[0], b = spine[1];
+    return Math.atan2(a.y - b.y, a.x - b.x);
+  }
+
+  // Body points with a traveling sine wave, plus normals
+  function bodyPts() {
+    const n = spine.length;
+    const out = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const p = spine[i];
+      const a = spine[Math.max(0, i - 1)];
+      const b = spine[Math.min(n - 1, i + 1)];
+      let tx = a.x - b.x, ty = a.y - b.y;
+      const d = Math.hypot(tx, ty) || 1;
+      tx /= d; ty /= d;
+      const nx = -ty, ny = tx;
+      const u = i / (n - 1);
+      const wave = Math.sin(t * 4.2 - i * 0.45) * (2 + 14 * u) * Math.min(1, i / 5);
+      out[i] = { x: p.x + nx * wave, y: p.y + ny * wave, nx, ny, u };
+    }
+    return out;
+  }
+
+  function radius(u) { return 2 + 16 * Math.pow(1 - u, 0.85); }
+
+  // Smooth stroke through points using midpoint quadratic curves
+  function smoothPath(pts) {
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length - 1; i++) {
+      const mx = (pts[i].x + pts[i + 1].x) / 2;
+      const my = (pts[i].y + pts[i + 1].y) / 2;
+      ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+    }
+    const l = pts[pts.length - 1];
+    ctx.lineTo(l.x, l.y);
+  }
+
+  // ---------- Drawing ----------
+  function drawLegs(P) {
+    const n = P.length;
+    if (n < 16) return;
+    for (const idx of [7, 14]) {
+      const p = P[idx];
+      const r = radius(p.u);
+      for (const s of [1, -1]) {
+        const sw = Math.sin(t * 6 + idx + (s > 0 ? 0 : Math.PI));
+        const tx = p.ny, ty = -p.nx; // toward head
+        const rootX = p.x + p.nx * s * r * 0.6;
+        const rootY = p.y + p.ny * s * r * 0.6;
+        const elbowX = rootX + p.nx * s * 20;
+        const elbowY = rootY + p.ny * s * 20;
+        const footX = elbowX + p.nx * s * 10 + tx * sw * 8;
+        const footY = elbowY + p.ny * s * 10 + ty * sw * 8;
+
+        ctx.beginPath();
+        ctx.moveTo(rootX, rootY);
+        ctx.lineTo(elbowX, elbowY);
+        ctx.lineTo(footX, footY);
+        ctx.strokeStyle = '#2a0a12';
+        ctx.lineWidth = 5;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+
+        // claws
+        ctx.strokeStyle = '#e6d2b0';
+        ctx.lineWidth = 1.6;
+        for (const c of [-0.5, 0, 0.5]) {
+          const ang = Math.atan2(footY - elbowY, footX - elbowX) + c;
+          ctx.beginPath();
+          ctx.moveTo(footX, footY);
+          ctx.lineTo(footX + Math.cos(ang) * 6, footY + Math.sin(ang) * 6);
+          ctx.stroke();
+        }
+      }
+    }
+  }
+
+  function drawBody(P) {
+    const n = P.length;
+    const L = [], R = [];
+    for (let i = 1; i < n; i++) {
+      const p = P[i];
+      const r = radius(p.u);
+      L.push({ x: p.x + p.nx * r, y: p.y + p.ny * r });
+      R.push({ x: p.x - p.nx * r, y: p.y - p.ny * r });
+    }
+    R.reverse();
+    const outline = L.concat(R);
+
+    const a = P[1], b = P[n - 1];
+    const g = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
+    g.addColorStop(0, '#9a1a2e');
+    g.addColorStop(0.55, '#520b1a');
+    g.addColorStop(1, '#1a0408');
+
+    ctx.beginPath();
+    smoothPath(outline);
+    ctx.closePath();
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = '#0d0206';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,70,40,0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Belly ridge (lighter underside line)
+    const belly = [];
+    for (let i = 1; i < n; i++) {
+      const p = P[i];
+      const r = radius(p.u) * 0.35;
+      belly.push({ x: p.x - p.nx * r, y: p.y - p.ny * r });
+    }
+    ctx.beginPath();
+    smoothPath(belly);
+    ctx.strokeStyle = 'rgba(255,120,70,0.25)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    // Scale arcs
+    ctx.strokeStyle = 'rgba(255,90,60,0.18)';
+    ctx.lineWidth = 1;
+    for (let i = 2; i < n - 1; i += 2) {
+      const p = P[i];
+      const r = radius(p.u);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r * 0.7, Math.atan2(p.ny, p.nx) - 0.9, Math.atan2(p.ny, p.nx) + 0.9);
+      ctx.stroke();
+    }
+  }
+
+  function drawSpikes(P) {
+    const n = P.length;
+    for (let i = 2; i < n - 1; i += 3) {
+      const p = P[i];
+      const r = radius(p.u) * 0.85;
+      const tX = p.ny, tY = -p.nx;     // toward head
+      const bX = -p.ny, bY = p.nx;     // toward tail
+      const sl = 4 + (1 - p.u) * 10;
+      for (const s of [1, -1]) {
+        const sx = p.nx * s, sy = p.ny * s;
+        const baseX = p.x + sx * r;
+        const baseY = p.y + sy * r;
+        const tipX = baseX + sx * sl * 0.9 + bX * sl * 0.7;
+        const tipY = baseY + sy * sl * 0.9 + bY * sl * 0.7;
+        ctx.beginPath();
+        ctx.moveTo(baseX + tX * 2.6, baseY + tY * 2.6);
+        ctx.lineTo(tipX, tipY);
+        ctx.lineTo(baseX - tX * 2.6, baseY - tY * 2.6);
+        ctx.closePath();
+        ctx.fillStyle = '#d8643a';
+        ctx.fill();
+        ctx.strokeStyle = '#2a0606';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+  }
+
+  function drawWings(P) {
+    const n = P.length;
+    if (n < 8) return;
+    const k = Math.min(6, n - 3);
+    const root = P[k];
+    const prev = P[k - 1];
+    let fx = prev.x - root.x, fy = prev.y - root.y;
+    const fl = Math.hypot(fx, fy) || 1;
+    fx /= fl; fy /= fl;
+    const bx = -fx, by = -fy;
+
+    const flap = Math.sin(t * 5.2);           // -1 .. 1
+    const L = 110 * (0.85 + 0.15 * Math.min(1, n / 60));
+    const span = L * (0.72 + 0.28 * flap);    // wings open and close
+
+    for (const s of [1, -1]) {
+      const ux = root.nx * s, uy = root.ny * s;
+      const wx = root.x + ux * span * 0.55 + bx * span * 0.1;
+      const wy = root.y + uy * span * 0.55 + by * span * 0.1;
+
+      const angles = [0.1, 0.5, 0.95, 1.35];
+      const lens = [0.62, 0.55, 0.45, 0.3];
+      const tips = angles.map((a, i) => {
+        const c = Math.cos(a), sn = Math.sin(a);
+        const dx = ux * c + bx * sn, dy = uy * c + by * sn;
+        return { x: wx + dx * span * lens[i], y: wy + dy * span * lens[i] };
+      });
+
+      // Membrane
+      ctx.beginPath();
+      ctx.moveTo(root.x, root.y);
+      ctx.lineTo(wx, wy);
+      ctx.lineTo(tips[0].x, tips[0].y);
+      for (let i = 1; i < tips.length; i++) {
+        const a = tips[i - 1], b2 = tips[i];
+        const mx = (a.x + b2.x) / 2, my = (a.y + b2.y) / 2;
+        ctx.quadraticCurveTo(mx + (mx - wx) * 0.25, my + (my - wy) * 0.25, b2.x, b2.y);
+      }
+      const last = tips[tips.length - 1];
+      ctx.quadraticCurveTo(
+        (last.x + root.x) / 2 + bx * span * 0.2,
+        (last.y + root.y) / 2 + by * span * 0.2,
+        root.x, root.y
+      );
+      ctx.closePath();
+
+      const wg = ctx.createRadialGradient(wx, wy, 4, wx, wy, span * 1.1);
+      wg.addColorStop(0, 'rgba(170,30,50,0.75)');
+      wg.addColorStop(1, 'rgba(70,8,20,0.6)');
+      ctx.fillStyle = wg;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,90,50,0.35)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Bones
+      ctx.strokeStyle = '#1e0509';
+      ctx.lineCap = 'round';
+      ctx.lineWidth = 3.5;
+      ctx.beginPath();
+      ctx.moveTo(root.x, root.y);
+      ctx.lineTo(wx, wy);
+      ctx.stroke();
+      ctx.lineWidth = 2.5;
+      for (const tp of tips) {
+        ctx.beginPath();
+        ctx.moveTo(wx, wy);
+        ctx.lineTo(tp.x, tp.y);
+        ctx.stroke();
+      }
+      // Claw tips on wings
+      ctx.fillStyle = '#e6d2b0';
+      for (const tp of tips) {
+        ctx.beginPath();
+        ctx.arc(tp.x, tp.y, 1.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  function drawHead(P0, P1) {
+    const hd = headingAngle();
+    const open = mouse.down ? 0.55 : 0.12 + 0.06 * Math.sin(t * 3);
+
+    ctx.save();
+    ctx.translate(P0.x, P0.y);
+    ctx.rotate(hd);
+
+    // Horns
+    ctx.lineCap = 'round';
+    for (const s of [1, -1]) {
+      ctx.beginPath();
+      ctx.moveTo(-6, s * 9);
+      ctx.quadraticCurveTo(-18, s * 16, -30, s * 26);
+      ctx.strokeStyle = '#120307';
+      ctx.lineWidth = 5;
+      ctx.stroke();
+      ctx.strokeStyle = '#b8945a';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+    }
+
+    // Lower jaw (opens)
+    ctx.save();
+    ctx.translate(2, open * 12);
+    ctx.beginPath();
+    ctx.moveTo(-8, 6);
+    ctx.quadraticCurveTo(12, 10, 32, 3);
+    ctx.lineTo(24, 12);
+    ctx.quadraticCurveTo(4, 16, -8, 12);
+    ctx.closePath();
+    ctx.fillStyle = '#5a0c1c';
+    ctx.fill();
+    ctx.strokeStyle = '#0d0206';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    // lower fangs
+    ctx.fillStyle = '#f2ead8';
+    for (const x of [14, 22]) {
+      ctx.beginPath();
+      ctx.moveTo(x, 9);
+      ctx.lineTo(x + 2.5, 9);
+      ctx.lineTo(x + 1.2, 3);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // Skull
+    ctx.beginPath();
+    ctx.moveTo(-10, -13);
+    ctx.quadraticCurveTo(6, -18, 20, -9);
+    ctx.quadraticCurveTo(34, -4, 38, 0);
+    ctx.quadraticCurveTo(34, 4, 20, 9);
+    ctx.quadraticCurveTo(6, 18, -10, 13);
+    ctx.closePath();
+    const hg = ctx.createLinearGradient(-10, 0, 38, 0);
+    hg.addColorStop(0, '#5a0c1c');
+    hg.addColorStop(0.7, '#a01c30');
+    hg.addColorStop(1, '#c4384a');
+    ctx.fillStyle = hg;
+    ctx.fill();
+    ctx.strokeStyle = '#0d0206';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Upper fangs
+    ctx.fillStyle = '#f2ead8';
+    for (const x of [18, 26, 32]) {
+      ctx.beginPath();
+      ctx.moveTo(x, 3);
+      ctx.lineTo(x + 2.5, 3);
+      ctx.lineTo(x + 1.2, 9 - open * 3);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // Nostrils with smoke
+    ctx.fillStyle = '#2a0408';
+    for (const s of [1, -1]) {
+      ctx.beginPath();
+      ctx.ellipse(33, s * 2.5, 1.6, 1, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Eyes: glowing, slit pupils, angry brow
+    for (const s of [1, -1]) {
+      const ex = 12, ey = s * 8;
+      ctx.shadowColor = '#ff9a00';
+      ctx.shadowBlur = 16;
+      const eg = ctx.createRadialGradient(ex, ey, 0.5, ex, ey, 6);
+      eg.addColorStop(0, '#fff4a0');
+      eg.addColorStop(0.5, '#ffb020');
+      eg.addColorStop(1, '#ff4a00');
+      ctx.fillStyle = eg;
+      ctx.beginPath();
+      ctx.ellipse(ex, ey, 5, 4, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.ellipse(ex + 0.5, ey, 1, 3.2, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = '#0c0206';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(ex - 7, ey + s * 5);
+      ctx.lineTo(ex + 8, ey + s * 1);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  function drawFire() {
+    const ctx = fx;
+    if (!fire.length) return;
+    ctx.globalCompositeOperation = 'source-over';
+    for (const p of fire) {
+      const a = p.life / p.max;
+      const r = p.size * (1 + (1 - a) * 1.6);
+      ctx.globalAlpha = Math.max(0, a * 0.5);
+ctx.fillStyle = a > 0.75 ? '#9fd8ff' : a > 0.5 ? '#ffd040' : a > 0.25 ? '#ff7a18' : '#c82000';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function drawEmbers() {
+    ctx.globalCompositeOperation = 'lighter';
+    for (const e of embers) {
+      const a = e.life / e.max;
+      ctx.globalAlpha = a * 0.8;
+      ctx.fillStyle = '#ff7a2a';
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, 1.5 + a * 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function render() {
+    fxC.width = canvas.width; fxC.height = canvas.height;
+    fx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    // Motion trail background
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = bgGrad();
+    ctx.fillRect(0, 0, W, H);
+
+    // Ambient red glow around the head
+    const head = spine[0];
+    const amb = ctx.createRadialGradient(head.x, head.y, 0, head.x, head.y, 260);
+    amb.addColorStop(0, 'rgba(255,70,40,0.22)');
+    amb.addColorStop(1, 'rgba(255,70,40,0)');
+    ctx.fillStyle = amb;
+    ctx.fillRect(0, 0, W, H);
+
+    for (const s of stars) {
+      const tw = 0.5 + 0.5 * Math.sin(t * 2 + s.p);
+      ctx.globalAlpha = 0.25 + 0.6 * tw;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(s.x * W, s.y * H, s.s, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    const P = bodyPts();
+    drawEmbers();
+    drawLegs(P);
+    drawBody(P);
+    drawSpikes(P);
+    drawWings(P);
+    drawHead(spine[0], spine[1]);
+    drawFire();
+
+    // Cursor marker
+    if (mouse.seen) {
+      ctx.strokeStyle = 'rgba(255,60,40,0.45)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(mouse.x, mouse.y, 6 + (mouse.down ? 4 : 0), 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    lenEl.textContent = spine.length;
+  }
+
+  // ---------- Loop ----------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    update(dt);
+    render();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
